@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::TcpStream};
 use url::Url;
 use tungstenite::{connect, stream::MaybeTlsStream, WebSocket};
 
-use crate::{log_debug, log_error, log_info, log_warn, models::socket_container::socket_container::ISocketContainer};
+use crate::{log_debug, log_error, log_info, log_warn, socket::socket_container::socket_container::ISocketContainer};
 
 pub struct BinanceContainer {
     symbols: Vec<String>, // ["btcusdt", ...]
