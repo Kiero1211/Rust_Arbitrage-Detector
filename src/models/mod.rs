@@ -1,3 +1,4 @@
+pub mod socket_container;
 use serde::{Deserialize, Serialize};
 
 /// Common response structure for API endpoints
