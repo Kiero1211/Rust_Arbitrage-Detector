@@ -1,11 +1,11 @@
 use serde::Deserialize;
 
-
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
     pub server_host: String,
     pub server_port: u16,
     pub log_level: Option<String>,
+    pub binance_socker_url: String
 }
 
 impl Config {
@@ -24,6 +24,7 @@ impl Default for Config {
             server_host: "127.0.0.1".to_string(),
             server_port: 3000,
             log_level: Some("info".to_string()),
+            binance_socker_url: "wss://stream.binance.com:9443/ws/{}@ticker".to_string()
         }
     }
 }
