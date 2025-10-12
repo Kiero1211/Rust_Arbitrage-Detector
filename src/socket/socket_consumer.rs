@@ -21,7 +21,7 @@ impl SocketConsumer {
         SocketConsumer { 
             symbols: vec![],
             binance_symbol_map: HashMap::new(),
-            binance_container: BinanceContainer::new(binance_sender),
+            binance_container: BinanceContainer::new_with_sender(binance_sender),
             binance_receiver
         }
     }
@@ -47,7 +47,7 @@ impl SocketConsumer {
         for message in self.binance_receiver.iter() {
             println!("Received: {} => {}", message.symbol, message.price);
 
-            // TODO: Add to Hashmap
+            self.binance_symbol_map.insert(message.symbol.to_owned(), message.price);
         }
         Ok(())
     }
