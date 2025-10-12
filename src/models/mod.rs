@@ -48,3 +48,14 @@ pub struct Market {
     pub volume: f64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
+
+pub struct SymbolMessage {
+    pub symbol: String,
+    pub price: f64
+}
+
+impl SymbolMessage {
+    pub fn new(symbol: String, price: f64) -> Self {
+        SymbolMessage { symbol, price }
+    }
+}

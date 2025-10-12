@@ -1,57 +1,39 @@
-use std::{collections::HashMap, net::TcpStream};
+use std::{collections::HashMap, net::TcpStream, sync::Arc, thread::{self, JoinHandle}};
 use url::Url;
 use tungstenite::{connect, stream::MaybeTlsStream, WebSocket, Message};
 use serde_json::Value;
 use tungstenite::Error as WsError;
-use crate::{log_debug, log_error, log_info, log_warn, socket::socket_container::socket_container::ISocketContainer};
-
+use crate::{log_debug, log_error, log_info, log_warn, models::SymbolMessage};
+use std::sync::mpsc::{Sender};
 pub struct BinanceContainer {
-    symbols: Vec<String>, // ["btcusdt", ...]
-    endpoints: HashMap<String, String>,
-    sockets: HashMap<String, WebSocket<MaybeTlsStream<TcpStream>>>
+    sockets: HashMap<String, WebSocket<MaybeTlsStream<TcpStream>>>,
+    sender: Arc<Sender<SymbolMessage>>,
+    socket_threads: HashMap<String, JoinHandle<Result<(), String>>>
 }
 
 impl BinanceContainer {
-    pub fn new(symbols: Vec<String>) -> Self {
-        log_info!("Creating new BinanceContainer with {} symbols", symbols.len());
-
-        let mut endpoints: HashMap<String, String> = HashMap::new();
-        for symbol in &symbols {
-            let endpoint = format!("wss://stream.binance.com:9443/ws/{}@ticker", symbol);
-            endpoints.insert(symbol.to_string(), endpoint);
-        }
-
+    pub fn new(sender: Arc<Sender<SymbolMessage>>) -> Self {
         BinanceContainer { 
-            symbols,
-            endpoints,
-            sockets: HashMap::new()
+            sockets: HashMap::new(),
+            sender,
+            socket_threads: HashMap::new()
         }
     }
 
-    pub fn connect(&mut self) {
-        if self.symbols.is_empty() {
-            log_warn!("No symbols provided for Binance connection");
-            return;
-        }
-        
-        log_info!("Connecting to Binance with symbols: {:?}", self.symbols);
-        
+    pub fn init_socket_connection(&mut self, symbol: &str) {
         // Your connection logic here
-        for symbol in &self.symbols {
-            let endpoint = self.endpoints.get(symbol).unwrap();
-            match connect(Url::parse(&endpoint).unwrap()) {
-                Ok((socket, _response)) => {
-                    self.sockets.insert(symbol.clone(), socket);
-                    let success_message = format!("[BinanceContainer] successfully connected to socket for symbol ({})", symbol);
-                    log_info!("{}", success_message);
-                }
-                Err(err) => {
-                    let error_log = format!("Cannot connect to Binance Websocket for symbol ({}), details: {}", symbol, err);
-                    log_error!("{}", error_log); 
-                    continue;
-                }
-            };
-        }
+        let endpoint = format!("wss://stream.binance.com:9443/ws/{}@ticker", symbol);
+        match connect(Url::parse(&endpoint).unwrap()) {
+            Ok((socket, _response)) => {
+                self.sockets.insert(symbol.to_owned(), socket);
+                let success_message = format!("[BinanceContainer] successfully connected to socket for symbol ({})", symbol);
+                log_info!("{}", success_message);
+            }
+            Err(err) => {
+                let error_log = format!("Cannot connect to Binance Websocket for symbol ({}), details: {}", symbol, err);
+                log_error!("{}", error_log); 
+            }
+        };
         
         log_info!("Finished connected to Binance WebStocke");
     }
@@ -62,99 +44,87 @@ impl BinanceContainer {
     }
 
     /// Check if a socket connection exists for the given symbol
-    pub fn is_connected(&self, symbol: &str) -> bool {
+    pub fn has_socket_connection(&self, symbol: &str) -> bool {
         self.sockets.contains_key(symbol)
     }
 
-    pub fn get_data<T>(&mut self, symbol: String, callback: T) -> Result<(), String>
-    where 
-        T: Fn(&str, &str),
+    pub fn get_data(&mut self, symbol: &str) -> Result<(), String>
     {
         log_info!("Starting data stream for symbol: {}", symbol);
-        let socket = self.sockets.get_mut(&symbol).ok_or_else(|| format!("No socket found for symbol: {}", symbol))?;
-
-        loop {
-            // Single read call - no duplicate reading
+        let socket = self.sockets.remove(symbol).ok_or_else(|| format!("No socket found for symbol: {}", symbol))?;
+        let sender = self.sender.clone();
+        let symbol_owned = symbol.to_owned();
+        let sender = Arc::clone(&self.sender);
+        let handle = thread::spawn(move || {
+            let mut socket = socket;
+            loop {
             match socket.read() {
                 Ok(Message::Text(text)) => {
-                    log_debug!("Received message for {}: {}", symbol, text);
-        
                     match serde_json::from_str::<Value>(&text) {
                         Ok(json) => {
                             if let Some(price) = json["c"].as_str() {
-                                log_debug!("{} price updated: {}", symbol.to_uppercase(), price);
-                                callback(&symbol, price);
+                                if let Ok(price) = price.parse::<f64>() {
+                                    let message = SymbolMessage::new(symbol_owned.clone(), price);
+                                    
+                                    // Send to channel
+                                    if let Err(e) = sender.send(message) {
+                                        log_error!("Failed to send message to channel: {}", e);
+                                        return Err(format!("Channel send error: {}", e));
+                                    }
+                                } else {
+                                    let error = format!("Failed to parse price: {}", price);
+                                    log_error!("{}", error);
+                                }
                             } else {
-                                log_warn!("No price field 'c' found in message for {}", symbol);
+                                log_warn!("No price field 'c' found in message for {}", symbol_owned);
                             }
                         }
                         Err(e) => {
-                            log_warn!("Failed to parse JSON for {}: {}", symbol, e);
+                            log_warn!("Failed to parse JSON for {}: {}", symbol_owned, e);
                         }
                     }
                 }
                 Ok(Message::Close(_)) => {
-                    return self.handle_close(&symbol);
+                    log_info!("WebSocket connection closed for {}", symbol_owned);
                 }
                 Ok(Message::Binary(_)) => {
-                    log_debug!("Received binary message for {} (ignoring)", symbol);
+                    log_debug!("Received binary message for {} (ignoring)", symbol_owned);
                 }
                 Err(e) => {
-                    return self.handle_error(&symbol, e);
+                    log_error!("WebSocket error for {}: {}", symbol_owned, e);
                 }
-                _ => ()
+                _ => {
+                    log_warn!("Unknown message type for {}", symbol_owned);
+                }
             }
         }
-    }
+        });
 
-    pub fn start_price_monitoring(&mut self) -> Result<(), String> {
-        for symbol in self.symbols.clone() {
-            let symbol_clone = symbol.clone();
-            
-            // Start monitoring in a separate thread or task
-            match self.get_data(symbol, |sym, price| {
-                // Handle price update
-                println!("Price update - {}: {}", sym.to_uppercase(), price);
-                
-                // You could also send to a channel, update shared state, etc.
-            }) {
-                Ok(_) => {
-                    log_info!("Finished monitoring {}", symbol_clone);
-                }
-                Err(e) => {
-                    log_error!("Error monitoring {}: {}", symbol_clone, e);
-                }
-            }
-        }
+        self.socket_threads.insert(symbol.to_owned(), handle);
         Ok(())
     }
 }
 
 // Helper methods to keep the main function clean
 impl BinanceContainer {
-    fn handle_close(&mut self, symbol: &str) -> Result<(), String> {
+    fn handle_close(&mut self, symbol: &str) {
         log_info!("WebSocket closed for symbol: {}", symbol);
         self.sockets.remove(symbol);
-        Err(format!("WebSocket closed for symbol: {}", symbol))
     }
 
-    fn handle_error(&mut self, symbol: &str, error: WsError) -> Result<(), String> {
+    fn handle_error(&mut self, symbol: &str, error: WsError) {
         let error_msg = match error {
             WsError::ConnectionClosed => {
                 log_warn!("Connection closed for symbol: {}", symbol);
-                format!("Connection closed for symbol: {}", symbol)
             }
             WsError::AlreadyClosed => {
                 log_warn!("Socket already closed for symbol: {}", symbol);
-                format!("Socket already closed for symbol: {}", symbol)
             }
             e => {
                 log_error!("WebSocket error for {}: {}", symbol, e);
-                format!("WebSocket error for {}: {}", symbol, e)
             }
         };
         
         self.sockets.remove(symbol);
-        Err(error_msg)
     }
 }
