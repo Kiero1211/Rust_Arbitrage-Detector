@@ -1,5 +1,7 @@
+use std::thread;
+
 use dotenvy::dotenv;
-use arbitrage_detector::{config::Config, create_app, error::AppError, logger, log_info};
+use arbitrage_detector::{config::Config, create_app, error::AppError, log_info, logger, socket::socket_consumer::{self, SocketConsumer}};
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
@@ -22,13 +24,19 @@ async fn main() -> Result<(), AppError> {
     let server_address = config.server_address();
     log_info!("Server starting on {}", server_address);
     
-    let listener = tokio::net::TcpListener::bind(&server_address)
-        .await
-        .map_err(|e| AppError::InternalServerError(format!("Failed to bind to {}: {}", server_address, e)))?;
+    // let listener = tokio::net::TcpListener::bind(&server_address)
+    //     .await
+    //     .map_err(|e| AppError::InternalServerError(format!("Failed to bind to {}: {}", server_address, e)))?;
     
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| AppError::InternalServerError(format!("Server error: {}", e)))?;
+    // axum::serve(listener, app)
+    //     .await
+    //     .map_err(|e| AppError::InternalServerError(format!("Server error: {}", e)))?;
 
+    let mut socket_consumer = SocketConsumer::new();
+    socket_consumer.add_symbol("btcusdt".to_string());
+    let handle = thread::spawn(move|| {
+        socket_consumer.start_binance_price_monitoring();
+    });
+    handle.join();
     Ok(())
 }

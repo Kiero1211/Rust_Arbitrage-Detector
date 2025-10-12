@@ -3,7 +3,7 @@ use url::Url;
 use tungstenite::{connect, stream::MaybeTlsStream, WebSocket, Message};
 use serde_json::Value;
 use tungstenite::Error as WsError;
-use crate::{log_debug, log_error, log_info, log_warn, models::SymbolMessage};
+use crate::{log_debug, log_error, log_info, log_warn, models::SymbolMessage, socket};
 use std::sync::mpsc::{Sender};
 pub struct BinanceContainer {
     sockets: HashMap<String, WebSocket<MaybeTlsStream<TcpStream>>>,
@@ -20,8 +20,17 @@ impl BinanceContainer {
         }
     }
 
-    pub fn init_socket_connection(&mut self, symbol: &str) {
+    pub fn add_symbol(&mut self, symbol: &str) -> Result<(), String> {
+        self.init_socket_connection(symbol);
+        return self.get_data(symbol);
+    }
+
+    fn init_socket_connection(&mut self, symbol: &str) {
         // Your connection logic here
+        if self.has_socket_connection(symbol) {
+            return;
+        }
+
         let endpoint = format!("wss://stream.binance.com:9443/ws/{}@ticker", symbol);
         match connect(Url::parse(&endpoint).unwrap()) {
             Ok((socket, _response)) => {
@@ -48,7 +57,7 @@ impl BinanceContainer {
         self.sockets.contains_key(symbol)
     }
 
-    pub fn get_data(&mut self, symbol: &str) -> Result<(), String>
+    fn get_data(&mut self, symbol: &str) -> Result<(), String>
     {
         log_info!("Starting data stream for symbol: {}", symbol);
         let socket = self.sockets.remove(symbol).ok_or_else(|| format!("No socket found for symbol: {}", symbol))?;
@@ -85,6 +94,7 @@ impl BinanceContainer {
                     }
                 }
                 Ok(Message::Close(_)) => {
+                    // TODO: Handle close later
                     log_info!("WebSocket connection closed for {}", symbol_owned);
                 }
                 Ok(Message::Binary(_)) => {

@@ -14,7 +14,7 @@ pub struct SocketConsumer {
 }
 
 impl SocketConsumer {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let (binance_sender, binance_receiver) = mpsc::channel();
         let binance_sender = Arc::new(binance_sender);
 
@@ -26,17 +26,19 @@ impl SocketConsumer {
         }
     }
 
+    pub fn add_symbol(&mut self, symbol: String) {
+        self.symbols.push(symbol);
+    }
+
     pub fn start_binance_price_monitoring(&mut self) -> Result<(), String> {
         for symbol in &self.symbols {
-            let symbol_clone = symbol.clone();
-            
             // Start monitoring in a separate thread or task
-            match self.binance_container.get_data(&symbol) {
+            match self.binance_container.add_symbol(symbol) {
                 Ok(_) => {
-                    log_info!("Start monitoring {}", symbol_clone);
+                    log_info!("Start monitoring {symbol}");
                 }
                 Err(e) => {
-                    log_error!("Error monitoring {}: {}", symbol_clone, e);
+                    log_error!("Error monitoring {symbol}: {}", e);
                 }
             }
         }
