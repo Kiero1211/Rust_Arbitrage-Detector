@@ -47,7 +47,7 @@ impl CoinBaseContainer {
         }
     }
 
-    pub fn add_symbol(&mut self, symbol: &str) -> Result<(), String> {
+    pub fn add_symbol(&mut self, symbol: &str) -> Result<JoinHandle<Result<(), String>>, String> {
         // Add symbol to tracking list if not already present
         if !self.symbols.contains(&symbol.to_string()) {
             self.symbols.push(symbol.to_string());
@@ -96,7 +96,7 @@ impl CoinBaseContainer {
 
     /// Check if a socket connection exists for the given symbol
     pub fn has_socket_connection(&self) -> bool {
-        if let Some(socket) = &self.socket {
+        if let Some(_) = &self.socket {
             return true;
         } else {
             return false;
@@ -104,25 +104,22 @@ impl CoinBaseContainer {
     }
 
     /// Start monitoring multiple cryptocurrency symbols
-    pub async fn start_monitoring(&mut self, symbols: Vec<String>) -> Result<(), String> {
-        for symbol in symbols {
-            self.init_socket_connection(&symbol);
-            self.get_data(&symbol)?;
-        }
+    pub async fn start_monitoring(&mut self) -> Result<(), String> {
+        self.init_socket_connection();
+        self.get_data()?;
         Ok(())
     }
 
-    fn get_data(&mut self) -> Result<(), String>
+    fn get_data(&mut self) -> Result<JoinHandle<Result<(), String>>, String>
     {
         if let None = self.socket {
             log_error!("[CoinBaseContainer - get_data] There is no socket connection to get data");
             return Err("[CoinBaseContainer - get_data] There is no socket connection to get data".to_string());
         }
-        let socket: WebSocket<MaybeTlsStream<TcpStream>> = self.socket.unwrap();
+        let socket: WebSocket<MaybeTlsStream<TcpStream>> = self.socket.take().unwrap();
 
         let sender = Arc::clone(&self.sender);
         let shutdown = Arc::clone(&self.shutdown);
-        let max_attempts = self.max_reconnect_attempts;
         
         let handle = thread::spawn(move || {
             let mut socket = socket;
@@ -135,59 +132,28 @@ impl CoinBaseContainer {
                 
                 match socket.read() {
                     Ok(Message::Text(text)) => {
-                        self.on_message(text, &sender);
+                        Self::on_message(text, &sender);
                     }
                     Ok(Message::Close(_)) => {
-                        on_close();
+                        log_info!("[CoinBaseContainer - get_data] WebSocket connection closed");
                     }
                     Err(e) => {
-                        log_error!("WebSocket error for {}: {}", symbol_owned, e);
-                        
-                        // Attempt to reconnect automatically on error
-                        if self.reconnect_attempts < max_attempts {
-                            self.reconnect_attempts += 1;
-                            log_info!("Attempting reconnection {} of {} for {} due to error", self.reconnect_attempts, max_attempts, symbol_owned);
-                            
-                            // Wait before reconnecting (exponential backoff)
-                            let delay = std::time::Duration::from_millis(1000 * self.reconnect_attempts as u64);
-                            std::thread::sleep(delay);
-                            
-                            // Try to create a new connection
-                            let endpoint = format!("wss://stream.binance.com:9443/ws/{}@ticker", symbol_owned);
-                            match connect(Url::parse(&endpoint).unwrap()) {
-                                Ok((new_socket, _response)) => {
-                                    socket = new_socket;
-                                    log_info!("✅ Successfully reconnected to {} (attempt {})", symbol_owned, self.reconnect_attempts);
-                                    continue;
-                                }
-                                Err(reconnect_error) => {
-                                    log_error!("Reconnection attempt {} failed for {}: {}", self.reconnect_attempts, symbol_owned, reconnect_error);
-                                    if self.reconnect_attempts >= max_attempts {
-                                        log_error!("Max reconnection attempts reached for {}, giving up", symbol_owned);
-                                        return Err(format!("Max reconnection attempts reached"));
-                                    }
-                                }
-                            }
-                        } else {
-                            log_error!("Max reconnection attempts reached for {}, giving up", symbol_owned);
-                            return Err(format!("Max reconnection attempts reached"));
-                        }
+                        log_error!("[CoinBaseContainer - get_data] WebSocket error: {}", e);
+                        // self.on_error();
                     }
                     _ => {
-                        log_warn!("Unknown message type for {}", symbol_owned);
+                        log_warn!("Unknown message type");
                     }
                 }
             }
             
             Ok(())
         });
-
-        self.socket_thread = Some(handle);
-        Ok(())
+        
+        return Ok(handle);
     }
 
-    fn on_message(&mut self, text: String, sender: &Arc<Sender<SymbolMessage>>) -> Result<(), String> {
-        self.reconnect_attempts = 0;
+    fn on_message(text: String, sender: &Arc<Sender<SymbolMessage>>) -> Result<(), String> {
         match serde_json::from_str::<Value>(&text) {
             Ok(json) => {
                 if json["type"] == "ticker" {
@@ -219,7 +185,7 @@ impl CoinBaseContainer {
         Ok(())
     }
 
-    fn on_close(&mut self, shutdown: Arc<AtomicBool>) -> Result<(), String> {
+    fn on_close(mut reconnect_attempts: u32, max_reconnect_attempts: u32, shutdown: Arc<AtomicBool>) -> Result<(), String> {
         log_info!("[CoinBaseContainer - get_data] WebSocket connection closed");
         // Check if shutdown is requested
         if shutdown.load(Ordering::Relaxed) {
@@ -228,6 +194,26 @@ impl CoinBaseContainer {
         }   
 
         // Attempt to reconnect automatically
+        // if reconnect_attempts < max_reconnect_attempts {
+        //     reconnect_attempts += 1;
+        //     log_info!("[CoinBaseContainer - get_data] Attempting reconnection {} of {}", reconnect_attempts, max_reconnect_attempts);
+            
+        //     // Wait before reconnecting (exponential backoff)
+        //     let delay = std::time::Duration::from_millis(1000 * reconnect_attempts as u64);
+        //     std::thread::sleep(delay);
+            
+            
+        // } else {
+        //     log_error!("Max reconnection attempts reached, giving up");
+        //     return Err(format!("Max reconnection attempts reached"));
+        // }
+
+        Ok(())
+    }
+
+    fn on_error(&mut self) -> Result<(), String> {
+                        
+        // Attempt to reconnect automatically on error
         if self.reconnect_attempts < self.max_reconnect_attempts {
             self.reconnect_attempts += 1;
             log_info!("[CoinBaseContainer - get_data] Attempting reconnection {} of {}", self.reconnect_attempts, self.max_reconnect_attempts);
@@ -246,50 +232,46 @@ impl CoinBaseContainer {
 
         Ok(())
     }
-
-    fn on_error(&mut self, error: tungstenite::Error) {
-
-    }
 }
 
 // Helper methods to keep the main function clean
 impl CoinBaseContainer {
 
-    /// Gracefully shutdown all connections and threads
-    pub fn shutdown(&mut self) {
-        log_info!("Initiating graceful shutdown of CoinBaseContainer");
+    // Gracefully shutdown all connections and threads
+    // pub fn shutdown(&mut self) {
+    //     log_info!("Initiating graceful shutdown of CoinBaseContainer");
         
-        // Set shutdown flag
-        self.shutdown.store(true, Ordering::Relaxed);
+    //     // Set shutdown flag
+    //     self.shutdown.store(true, Ordering::Relaxed);
         
-        // Close all WebSocket connections
-        log_info!("Closing {} WebSocket connections", self.sockets.len());
-        for (symbol, mut socket) in self.sockets.drain() {
-            log_debug!("Closing socket for symbol: {}", symbol);
-            if let Err(e) = socket.close(None) {
-                log_warn!("Error closing socket for {}: {}", symbol, e);
-            }
-        }
+    //     // Close all WebSocket connections
+    //     log_info!("Closing {} WebSocket connections", self.sockets.len());
+    //     for (symbol, mut socket) in self.sockets.drain() {
+    //         log_debug!("Closing socket for symbol: {}", symbol);
+    //         if let Err(e) = socket.close(None) {
+    //             log_warn!("Error closing socket for {}: {}", symbol, e);
+    //         }
+    //     }
         
-        // Wait for all socket threads to complete
-        log_info!("Waiting for {} socket threads to complete", self.socket_threads.len());
-        for (symbol, handle) in self.socket_threads.drain() {
-            log_debug!("Waiting for thread to complete: {}", symbol);
-            match handle.join() {
-                Ok(result) => {
-                    match result {
-                        Ok(_) => log_debug!("Thread for {} completed successfully", symbol),
-                        Err(e) => log_warn!("Thread for {} ended with error: {}", symbol, e),
-                    }
-                }
-                Err(e) => {
-                    log_error!("Error joining thread for {}: {:?}", symbol, e);
-                }
-            }
-        }
+    //     // Wait for all socket threads to complete
+    //     log_info!("Waiting for {} socket threads to complete", self.socket_threads.len());
+    //     for (symbol, handle) in self.socket_threads.drain() {
+    //         log_debug!("Waiting for thread to complete: {}", symbol);
+    //         match handle.join() {
+    //             Ok(result) => {
+    //                 match result {
+    //                     Ok(_) => log_debug!("Thread for {} completed successfully", symbol),
+    //                     Err(e) => log_warn!("Thread for {} ended with error: {}", symbol, e),
+    //                 }
+    //             }
+    //             Err(e) => {
+    //                 log_error!("Error joining thread for {}: {:?}", symbol, e);
+    //             }
+    //         }
+    //     }
         
-        log_info!("CoinBaseContainer shutdown completed");
-    }
+    //     log_info!("CoinBaseContainer shutdown completed");
+    // }
 
 
 }
@@ -298,7 +280,7 @@ impl CoinBaseContainer {
 impl Drop for CoinBaseContainer {
     fn drop(&mut self) {
         log_info!("CoinBaseContainer is being dropped, initiating cleanup");
-        self.shutdown();
+        // self.shutdown();
     }
 }
 
