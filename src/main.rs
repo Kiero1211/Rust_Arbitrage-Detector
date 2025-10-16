@@ -1,7 +1,7 @@
 use std::thread;
 
 use dotenvy::dotenv;
-use arbitrage_detector::{config::Config, create_app, error::AppError, log_info, logger, socket::socket_consumer::{self, SocketConsumer}};
+use arbitrage_detector::{config::Config, create_app, error::AppError, log_info, logger, socket::{socket_consumer::{self, SocketConsumer}, socket_container::coinbase_container::CoinBaseContainer}};
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
@@ -32,11 +32,28 @@ async fn main() -> Result<(), AppError> {
     //     .await
     //     .map_err(|e| AppError::InternalServerError(format!("Server error: {}", e)))?;
 
-    let mut socket_consumer = SocketConsumer::new();
-    socket_consumer.add_symbol("btcusdt".to_string());
-    let handle = thread::spawn(move|| {
-        socket_consumer.start_binance_price_monitoring();
+    // let mut socket_consumer = SocketConsumer::new();
+    // socket_consumer.add_symbol("btcusdt".to_string());
+    // let handle = thread::spawn(move|| {
+    //     socket_consumer.start_binance_price_monitoring();
+    // });
+    // handle.join();
+
+    let mut coinbase_container = CoinBaseContainer::new();
+    coinbase_container.add_symbol("ETH-USDT");
+    coinbase_container.add_symbol("BTC-USDT");
+    let handle = thread::spawn(move || {
+        coinbase_container.start_monitoring();
+
+        let handle = thread::spawn(move || {
+            coinbase_container.on_symbol_update(|symbol, price| {
+                println!("Got {} - ${}", symbol, price);
+            });
+        });
+
+        handle.join();
     });
+
     handle.join();
     Ok(())
 }

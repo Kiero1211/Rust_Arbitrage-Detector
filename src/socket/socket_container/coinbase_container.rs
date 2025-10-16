@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Binary, net::TcpStream, sync::Arc, thread::{self, JoinHandle}};
+use std::{collections::HashMap, fmt::Binary, net::TcpStream, sync::{mpsc::Receiver, Arc}, thread::{self, JoinHandle}};
 use url::Url;
 use tungstenite::{connect, stream::MaybeTlsStream, WebSocket, Message};
 use serde_json::{json, Value};
@@ -14,47 +14,41 @@ pub struct CoinBaseContainer {
     shutdown: Arc<AtomicBool>,
     max_reconnect_attempts: u32,
     reconnect_attempts: u32,
+    receiver: Receiver<SymbolMessage>
 }
 
 impl CoinBaseContainer {
     pub fn new() -> Self {
-        let (sender, _receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::channel();
         let sender = Arc::new(sender);
-        Self::new_with_sender(sender)
-    }
 
-    pub fn new_with_sender(sender: Arc<Sender<SymbolMessage>>) -> Self {
         CoinBaseContainer { 
             socket: None,
             sender,
+            receiver,
             socket_thread: None,
             symbols: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
             max_reconnect_attempts: 5,
-            reconnect_attempts: 0
+            reconnect_attempts: 0,
         }
     }
 
-    pub fn with_reconnect_limit(sender: Arc<Sender<SymbolMessage>>, max_attempts: u32) -> Self {
-        CoinBaseContainer { 
-            socket: None,
-            sender,
-            socket_thread: None,
-            symbols: Vec::new(),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            max_reconnect_attempts: max_attempts,
-            reconnect_attempts: 0
-        }
-    }
-
-    pub fn add_symbol(&mut self, symbol: &str) -> Result<JoinHandle<Result<(), String>>, String> {
+    pub fn add_symbol(&mut self, symbol: &str) {
         // Add symbol to tracking list if not already present
         if !self.symbols.contains(&symbol.to_string()) {
             self.symbols.push(symbol.to_string());
         }
-        
-        self.init_socket_connection();
-        return self.get_data();
+    }
+
+    pub fn on_symbol_update<T>(&mut self, callback: T)
+    where
+        T: Fn(&str, f64)
+    {
+        let received_messages = self.receiver.iter();
+        for received in received_messages {
+            callback(&received.symbol, received.price);
+        }
     }
 
     fn init_socket_connection(&mut self) -> Result<(), String> {
@@ -104,13 +98,14 @@ impl CoinBaseContainer {
     }
 
     /// Start monitoring multiple cryptocurrency symbols
-    pub async fn start_monitoring(&mut self) -> Result<(), String> {
-        self.init_socket_connection();
-        self.get_data()?;
-        Ok(())
+    pub fn start_monitoring(&mut self) -> Result<JoinHandle<()>, String> {
+        match self.init_socket_connection() {
+            Ok(_) => self.get_data(),
+            Err(msg) => Err(msg)
+        }
     }
 
-    fn get_data(&mut self) -> Result<JoinHandle<Result<(), String>>, String>
+    fn get_data(&mut self) -> Result<JoinHandle<()>, String>
     {
         if let None = self.socket {
             log_error!("[CoinBaseContainer - get_data] There is no socket connection to get data");
@@ -125,7 +120,7 @@ impl CoinBaseContainer {
             let mut socket = socket;
             loop {
                 // Check if shutdown is requested
-                if shutdown.load(Ordering::Relaxed) {
+                if shutdown.clone().load(Ordering::Relaxed) {
                     log_info!("[CoinBaseContainer - get_data] Shutdown requested, stopping data stream");
                     break;
                 }
@@ -135,7 +130,7 @@ impl CoinBaseContainer {
                         Self::on_message(text, &sender);
                     }
                     Ok(Message::Close(_)) => {
-                        log_info!("[CoinBaseContainer - get_data] WebSocket connection closed");
+                        Self::on_close(shutdown.clone());
                     }
                     Err(e) => {
                         log_error!("[CoinBaseContainer - get_data] WebSocket error: {}", e);
@@ -146,14 +141,12 @@ impl CoinBaseContainer {
                     }
                 }
             }
-            
-            Ok(())
         });
         
         return Ok(handle);
     }
 
-    fn on_message(text: String, sender: &Arc<Sender<SymbolMessage>>) -> Result<(), String> {
+    fn on_message(text: String, sender: &Arc<Sender<SymbolMessage>>) {
         match serde_json::from_str::<Value>(&text) {
             Ok(json) => {
                 if json["type"] == "ticker" {
@@ -166,31 +159,28 @@ impl CoinBaseContainer {
                             
                             // Send to channel
                             if let Err(e) = sender.send(message) {
-                                log_error!("[CoinBaseContainer - get_data] Failed to send message to channel: {}", e);
-                                return Err(format!(" [CoinBaseContainer - get_data] Channel send error: {}", e));
+                                log_error!("[CoinBaseContainer - on_message] Failed to send message to channel: {}", e);
                             }
                         } else {
                             let error = format!("Failed to parse price: {}", price);
                             log_error!("{}", error);
                         }
                     } else {
-                        log_warn!("[CoinBaseContainer - get_data] No price field 'c' found in message for {}", formatted_symbol);
+                        log_warn!("[CoinBaseContainer - on_message] No price field 'c' found in message for {}", formatted_symbol);
                     }
                 }
             }
             Err(e) => {
-                log_warn!("[CoinBaseContainer - get_data] Failed to parse JSON for {}: {}", &text, e);
+                log_warn!("[CoinBaseContainer - on_message] Failed to parse JSON for {}: {}", &text, e);
             }
         }
-        Ok(())
     }
 
-    fn on_close(mut reconnect_attempts: u32, max_reconnect_attempts: u32, shutdown: Arc<AtomicBool>) -> Result<(), String> {
-        log_info!("[CoinBaseContainer - get_data] WebSocket connection closed");
+    fn on_close(shutdown: Arc<AtomicBool>) {
+        log_info!("[CoinBaseContainer - on_close] WebSocket connection closed");
         // Check if shutdown is requested
         if shutdown.load(Ordering::Relaxed) {
-            log_info!("[CoinBaseContainer - get_data] Shutdown requested, no reconnection");
-            return Err("[CoinBaseContainer - get_data] Shutdown requested, no reconnection".to_string());
+            log_info!("[CoinBaseContainer - on_close] Shutdown requested, no reconnection");
         }   
 
         // Attempt to reconnect automatically
@@ -207,16 +197,14 @@ impl CoinBaseContainer {
         //     log_error!("Max reconnection attempts reached, giving up");
         //     return Err(format!("Max reconnection attempts reached"));
         // }
-
-        Ok(())
     }
 
-    fn on_error(&mut self) -> Result<(), String> {
+    fn on_error(&mut self) {
                         
         // Attempt to reconnect automatically on error
         if self.reconnect_attempts < self.max_reconnect_attempts {
             self.reconnect_attempts += 1;
-            log_info!("[CoinBaseContainer - get_data] Attempting reconnection {} of {}", self.reconnect_attempts, self.max_reconnect_attempts);
+            log_info!("[CoinBaseContainer - on_error] Attempting reconnection {} of {}", self.reconnect_attempts, self.max_reconnect_attempts);
             
             // Wait before reconnecting (exponential backoff)
             let delay = std::time::Duration::from_millis(1000 * self.reconnect_attempts as u64);
@@ -227,10 +215,7 @@ impl CoinBaseContainer {
             self.get_data();
         } else {
             log_error!("Max reconnection attempts reached, giving up");
-            return Err(format!("Max reconnection attempts reached"));
         }
-
-        Ok(())
     }
 }
 
