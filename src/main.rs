@@ -39,21 +39,21 @@ async fn main() -> Result<(), AppError> {
     // });
     // handle.join();
 
-    let mut coinbase_container = CoinBaseContainer::new();
-    coinbase_container.add_symbol("ETH-USDT");
-    coinbase_container.add_symbol("BTC-USDT");
-    let handle = thread::spawn(move || {
-        coinbase_container.start_monitoring();
+    // let mut coinbase_container = CoinBaseContainer::new();
+    // coinbase_container.add_symbol("ETH-USDT");
+    // coinbase_container.add_symbol("BTC-USDT");
+    // let handle = thread::spawn(move || {
+    //     coinbase_container.start_monitoring();
 
-        let handle = thread::spawn(move || {
-            coinbase_container.on_symbol_update(|symbol, price| {
-                println!("Got {} - ${}", symbol, price);
-            });
-        });
+    //     let handle = thread::spawn(move || {
+    //         coinbase_container.on_symbol_update(|symbol, price| {
+    //             println!("Got {} - ${}", symbol, price);
+    //         });
+    //     });
 
-        handle.join();
-    });
+    //     handle.join();
+    // });
 
-    handle.join();
+    // handle.join();
     Ok(())
 }

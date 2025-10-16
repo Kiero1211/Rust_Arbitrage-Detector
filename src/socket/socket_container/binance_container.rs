@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::TcpStream, sync::Arc, thread::{self, JoinHandle}};
+use std::{collections::HashMap, net::TcpStream, sync::{mpsc::Receiver, Arc}, thread::{self, JoinHandle}};
 use url::Url;
 use tungstenite::{connect, stream::MaybeTlsStream, WebSocket, Message};
 use serde_json::Value;
@@ -9,6 +9,7 @@ use std::sync::{atomic::AtomicBool, atomic::Ordering};
 pub struct BinanceContainer {
     sockets: HashMap<String, WebSocket<MaybeTlsStream<TcpStream>>>,
     sender: Arc<Sender<SymbolMessage>>,
+    sender: Receiver<SymbolMessage>,
     socket_threads: HashMap<String, JoinHandle<Result<(), String>>>,
     symbols: Vec<String>,
     shutdown: Arc<AtomicBool>,
@@ -19,10 +20,7 @@ impl BinanceContainer {
     pub fn new() -> Self {
         let (sender, _receiver) = std::sync::mpsc::channel();
         let sender = Arc::new(sender);
-        Self::new_with_sender(sender)
-    }
 
-    pub fn new_with_sender(sender: Arc<Sender<SymbolMessage>>) -> Self {
         BinanceContainer { 
             sockets: HashMap::new(),
             sender,
@@ -30,17 +28,6 @@ impl BinanceContainer {
             symbols: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
             max_reconnect_attempts: 5,
-        }
-    }
-
-    pub fn with_reconnect_limit(sender: Arc<Sender<SymbolMessage>>, max_attempts: u32) -> Self {
-        BinanceContainer { 
-            sockets: HashMap::new(),
-            sender,
-            socket_threads: HashMap::new(),
-            symbols: Vec::new(),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            max_reconnect_attempts: max_attempts,
         }
     }
 
